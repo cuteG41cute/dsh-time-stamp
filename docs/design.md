@@ -1,0 +1,95 @@
+# dsh-time-stamp 设计文档
+
+本文档记录插件的关键设计决策、约束排查与故障记录，方便后续维护与二次开发。
+
+## 1. 需求与约束
+
+1. 每个用户提问发出时，自动在提问后添加时间戳，让模型理解上下文时间逻辑
+2. 时间戳不能影响模型缓存命中率（或影响降至最低）
+3. 时间戳不能影响模型对用户意图的理解（无歧义）
+4. 时间戳不要粗暴显示在聊天界面（隐身优先）
+5. 用户可以在每个项目（工作区）下选择是否启用
+
+## 2. 注入点选型
+
+DSH 的模型请求链路：
+
+```
+用户消息 → inbox → agent/pre-step（waterfall，可替换进入 step 的消息）
+        → 消息追加进会话日志（user/message 事件，surfaceOp: append）
+        → session.deriveMessages()（日志 → 模型消息，无钩子）
+        → buildRequest()（deepFreeze 冻结请求）
+        → llm/stream（waterfall，options 已冻结，只能读）
+        → 适配器
+```
+
+| 候选注入点 | 结论 |
+|---|---|
+| `agent/pre-step` | ✅ 采用。可向决策消息追加内容；追加的消息由 agent-loop 写入日志（`session.append("user/message", ...)`），此后每次请求逐字节重放 |
+| `agent/request` | ❌ 官方文档明确 "Model-visible content must use logged channels; this waterfall cannot mutate messages" |
+| `llm/stream` | ❌ 请求对象在 `buildRequest` 中被 `deepFreeze`，waterfall 的 `next()` 闭包捕获原始 options，无法改写消息；且跳过 `next()` 会短路 invariant 校验 |
+| `system-prompt/assemble` / `variable` | ❌ 系统提示词每步重新组装，动态时间会导致每一步都打碎缓存前缀（系统提示词是缓存头部） |
+
+**结论**：唯一可行的注入点是 `agent/pre-step`，且注入内容必然进入日志（= 模型可见 = UI 可渲染）。这同时解释了约束 4 的边界：产品不变量决定了「只给模型看、不进日志」的完全隐身通道不存在，因此采用官方 `dsh-time-context` 同款持久化方案，界面呈现为产品原生设计的折叠式「上下文注入」行（灰色小字、可展开、非用户气泡）。
+
+## 3. 缓存命中率分析
+
+注入策略：**每条用户来源消息注入一次**（step 1 或含新用户消息的 step），工具循环的中间步骤不注入；注入文本在注入时刻一次性确定，之后永不重算。
+
+- 前缀缓存：历史消息（含注入消息）在后续每次请求中逐字节相同 → 前缀命中区不变
+- 未命中区：新用户消息本身就会造成该位置必然未命中；注入消息落在这个区域内，**没有扩大未命中区**
+- 无抖动：不采用「每步刷新当前时间」的策略（官方插件的 `refreshIntervalMs=0` 行为），因此同一轮内的工具循环步骤重放完全一致的序列化 → 完整命中
+- 重试/回放：日志不变 → 序列化不变 → 命中
+
+对比：若在 `system-prompt` 注入动态时间，每步系统提示词变化，缓存前缀整体失效，是反面教材。
+
+## 4. 消息与文本设计（无歧义）
+
+- 注入为**独立消息**（`source.kind: "plugin"`），绝不修改用户消息的 content
+- 文本以 "Time the user's latest message was received: ..." 开头，明确声明为系统时钟读数
+- 附解释指令：相对时间表述（现在/今天/刚才/now/today/yesterday）以此时刻为锚
+- 附带「距上一条用户消息的间隔」（扫描会话日志中最近一条 `source.kind === "user"` 的 `user/message` 事件的 time 计算）
+- 格式确定性：`Intl.DateTimeFormat("en-US", {..., hourCycle: "h23", timeZoneName: "longOffset"})`，同一时刻永远格式化出同一字符串
+
+## 5. 配置存储选型
+
+动态插件沙箱**没有 import 能力**，因此无法使用 `settings.register`（需要 schemastery 的 `z`）。备选方案：
+
+| 方案 | 结论 |
+|---|---|
+| `settings` 服务 | ❌ 注册 namespace 需要 zod/schemastery schema |
+| `storageDomain`（json backend） | ✅ 采用。`storageDomain.open()` 只要求 spec 的 `valueSchema` 提供 `parse`/`safeParse`，用鸭子类型 schema（`parse: v => v`）即可绕过 zod 依赖 |
+| workspace 实体 meta | ❌ Workspace 实体只有 id/path/title/时间戳，无 meta 袋 |
+
+存储结构（`~/.dsh/storages/time_stamp.json`）：
+
+```json
+{
+  "unit": { "name": "time_stamp", "version": 1 },
+  "tables": {
+    "projects": {
+      "<workspaceId>": { "enabled": false },
+      "__default__": { "enabled": true }
+    }
+  }
+}
+```
+
+## 6. 故障记录
+
+### 6.1 开关点击无反应（v1 → v3 修复）
+
+- **现象**：时间戳注入正常，但「时间戳 开/关」按钮点击无任何反应
+- **根因**：存储域名 `time-stamp` 含连字符，而 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/` 不允许连字符。JSON backend 在 `kv.open()` 直接抛 `malformed-medium`，apply 的 catch 吞掉异常 → `table === null` → 读路径走 `DEFAULT_ENABLED` 兜底（按钮显示正常、注入正常），写路径返回 `ok: false` 被客户端静默忽略
+- **修复**：域名改为 `time_stamp`；客户端增加失败可见性（红点 + 错误提示 + console.error）；Host 记录 `openError` 并通过 RPC 暴露 `storage` 字段
+- **教训**：任何依赖外部服务初始化的逻辑，失败时不能只写日志，还要让 UI 能感知；命名必须核对契约中的正则
+
+### 6.2 注入文本重复示例词
+
+- 早期版本注入文本中 "now, today, yesterday" 出现两遍，属纯文本瑕疵；在尚无任何消息被注入的窗口期修复，零缓存代价
+
+## 7. 已知边界
+
+- 动态插件进程内生命周期：DSH 重启后需重新加载（`cordis_define` + `cordis_run`），配置持久化不受影响
+- 注入消息与 compaction 的关系：被压缩掉属正常行为
+- 子代理/API 驱动的会话：只要其会话 cwd 属于某工作区，同样受该工作区开关控制

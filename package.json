@@ -1,0 +1,25 @@
+{
+  "name": "dsh-time-stamp",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness dynamic plugin: injects a durable clock-context message after every user question (cache-friendly, no ambiguity, stealth presentation) with per-project enable/disable.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "time",
+    "timestamp",
+    "context"
+  ],
+  "license": "MIT",
+  "author": "cuteG41cute",
+  "files": [
+    "plugin",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
