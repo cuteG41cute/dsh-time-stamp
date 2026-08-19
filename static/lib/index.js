@@ -6,16 +6,21 @@
 // Responsibilities:
 //  1. Register the 'time-stamp' settings namespace (schemastery schema,
 //     persisted in DSH_HOME/settings.yaml) holding the global default and
-//     per-workspace overrides.
+//     per-workspace overrides. The namespace is used HOST-side only: the
+//     apiProxy settings allowlist is hardcoded in @deepseek-ai/dsh-host-apiproxy
+//     (WEB_SETTINGS_NAMESPACES / PRODUCT_SETTINGS_NAMESPACES), so third-party
+//     namespaces are intentionally NOT served to configuration clients.
 //  2. Listen on agent/pre-step (prepend) and append ONE durable plugin-source
 //     clock message after every user-origin message, exactly like the
 //     dynamic version: written to the session log once, replayed
 //     byte-identically on every later request (provider prefix cache keeps
 //     hitting), never touching the user's own text.
-//  3. Expose the same wiring the client half reads through the settings
-//     transport (ctx.settingsScope on the browser).
+//  3. Serve a small JSON API on an exact webServer route
+//     (POST /dsh-time-stamp/api, body { method, args }) that the client half
+//     calls with fetch — the browser-side channel that bypasses the settings
+//     allowlist and needs no typert/zod machinery.
 //
-// The listener never throws: on any unexpected failure it passes the
+// The pre-step listener never throws: on any unexpected failure it passes the
 // original decision through so the agent loop is never disturbed.
 import { Service } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
@@ -24,6 +29,8 @@ import s from '@deepseek-ai/schemastery'
 export const SETTINGS_NS = 'time-stamp'
 /** Source plugin name stamped into injected messages. */
 export const PLUGIN = 'time-stamp'
+/** Exact webServer route serving the client JSON API. */
+export const ROUTE_PATH = '/dsh-time-stamp/api'
 
 /** Monotonic suffix so two injections in the same millisecond never collide. */
 let messageSeq = 0
@@ -71,7 +78,7 @@ function deepFreeze(value) {
 }
 
 export class TimeStampService extends Service {
-  static inject = ['settings', 'workspaceRegistry', 'agents']
+  static inject = ['settings', 'workspaceRegistry', 'agents', 'webServer']
 
   constructor(ctx) {
     super(ctx, 'timeStamp')
@@ -80,6 +87,11 @@ export class TimeStampService extends Service {
   async [Service.init]() {
     this.ctx.settings.register(SETTINGS_NS, timeStampSettingsSchema)
     this.ctx.effect(() => this.ctx.on('agent/pre-step', (payload, next) => this.onPreStep(payload, next), { prepend: true }))
+    this.ctx.effect(() => this.ctx.webServer.register({
+      kind: 'exact',
+      path: ROUTE_PATH,
+      handler: (req, res) => this.handleApi(req, res),
+    }))
   }
 
   /** Resolve the workspace owning one agent's session cwd. */
@@ -157,6 +169,92 @@ export class TimeStampService extends Service {
       console.error(`[time-stamp] pre-step injection failed, passing through: ${error instanceof Error ? error.message : String(error)}`)
       return next()
     }
+  }
+
+  // ── client JSON API over the webServer route ──
+
+  /** HTTP entry: one JSON request per call. */
+  async handleApi(req, res) {
+    const send = (status, body) => {
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify(body))
+    }
+    if (req.method !== 'POST') {
+      send(405, { ok: false, reason: 'method-not-allowed' })
+      return
+    }
+    let raw = ''
+    try {
+      for await (const chunk of req) raw += chunk
+    } catch {
+      send(400, { ok: false, reason: 'read-failed' })
+      return
+    }
+    let request
+    try {
+      request = JSON.parse(raw)
+    } catch {
+      send(400, { ok: false, reason: 'bad-json' })
+      return
+    }
+    const method = request && typeof request.method === 'string' ? request.method : ''
+    const args = request && typeof request.args === 'object' && request.args !== null ? request.args : {}
+    try {
+      send(200, await this.dispatch(method, args))
+    } catch (error) {
+      send(200, { ok: false, reason: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /** Dispatch one JSON-RPC-style call. */
+  async dispatch(method, args) {
+    switch (method) {
+      case 'state': {
+        const sessionId = typeof args.sessionId === 'string' ? args.sessionId : undefined
+        const agent = sessionId !== undefined ? this.ctx.agents.get(sessionId) : undefined
+        const workspaceId = agent ? await this.workspaceIdOf(agent) : undefined
+        let title = null
+        if (workspaceId !== undefined) {
+          const ws = this.ctx.workspaceRegistry.get(workspaceId)
+          if (ws) title = ws.title
+        }
+        return {
+          ok: true,
+          workspaceId: workspaceId === undefined ? null : workspaceId,
+          title,
+          enabled: this.enabledFor(workspaceId),
+          defaultEnabled: this.enabledFor(undefined),
+        }
+      }
+      case 'set-enabled': {
+        const workspaceId = typeof args.workspaceId === 'string' && args.workspaceId !== '' ? args.workspaceId : undefined
+        const enabled = typeof args.enabled === 'boolean' ? args.enabled : undefined
+        if (enabled === undefined) return { ok: false, reason: 'bad args' }
+        if (workspaceId === undefined) await this.writeDefault(enabled)
+        else await this.writeProject(workspaceId, enabled)
+        return { ok: true, enabled }
+      }
+      case 'get-default':
+        return { ok: true, enabled: this.enabledFor(undefined) }
+      case 'set-default': {
+        const enabled = typeof args.enabled === 'boolean' ? args.enabled : undefined
+        if (enabled === undefined) return { ok: false, reason: 'bad args' }
+        await this.writeDefault(enabled)
+        return { ok: true, enabled }
+      }
+      default:
+        return { ok: false, reason: `unknown method: ${method}` }
+    }
+  }
+
+  /** Set one workspace override via a path-addressed settings mutation. */
+  async writeProject(workspaceId, enabled) {
+    await this.ctx.settings.mutate(SETTINGS_NS, [{ op: 'set', path: ['projects', workspaceId], value: enabled }])
+  }
+
+  /** Set the global default via a path-addressed settings mutation. */
+  async writeDefault(enabled) {
+    await this.ctx.settings.mutate(SETTINGS_NS, [{ op: 'set', path: ['defaultEnabled'], value: enabled }])
   }
 }
 

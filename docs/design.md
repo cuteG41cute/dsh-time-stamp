@@ -102,15 +102,17 @@ DSH 的模型请求链路：
 
 动态沙箱**没有 import 能力**，只能用鸭子类型 schema 打开 storageDomain；静态包是正规 npm 包，直接 `settings.register('time-stamp', s.object({...}))`（schemastery），配置持久化到 `settings.yaml` 的 `time-stamp` 段，带 schema 校验与默认值，且用户可直接编辑文件。
 
-### 8.2 客户端通道：harness.handle → settingsScope
+### 8.2 客户端通道：harness.handle → webServer 路由
 
-动态版客户端用 `host.call`（动态 runner 专属内置）；静态版没有该内置。候选方案对比：
+动态版客户端用 `host.call`（动态 runner 专属内置）；静态版没有该内置。候选方案对比（按实际验证结论）：
 
 | 方案 | 结论 |
 |---|---|
 | `@Remote` / typert | ❌ 客户端 remote 注册表要求真实 zod v4 schema 实例，而浏览器运行时把 zod **内联**在 dsh-client-connection / dsh-api-remotes 的 bundle 里，模块表没有可 require 的 `zod`；手写包无法满足校验 |
-| webServer 路由 + fetch | 可行但自建 HTTP 面 |
-| `settingsScope`（api.settings 通道） | ✅ 采用。Host 注册命名空间后，客户端 `ctx.settingsScope.bind({namespace, decode})` 获得控制器：`getSnapshot()/subscribe()/set(field, value)/write(op)`，读写走统一 API（loopback），**零自定义 RPC、零 zod** |
+| `settingsScope`（api.settings 通道） | ❌ **实测否决**：apiProxy 的 settings.describe 有硬编码白名单（`WEB_SETTINGS_NAMESPACES` / `PRODUCT_SETTINGS_NAMESPACES`，dsh-host-apiproxy），第三方命名空间一律 `settings-not-exposed`（源码注释明言"让插件通过 settings.register 自暴露是推迟的工作"）。Host 侧 describe 有 13 个命名空间，客户端只见 11 个，`time-stamp` 被过滤 → 快照永远 `unavailable` |
+| webServer 路由 + fetch | ✅ 最终采用。Host 注册 exact 路由 `POST /dsh-time-stamp/api`（JSON `{method, args}`），客户端 `fetch` 同源调用——零白名单、零 typert、零 zod，与动态版 `host.call` 同构（state/set-enabled/get-default/set-default） |
+
+调试经验：客户端通道问题可用**动态插件可视化探针**定位（注入 header 插槽，直接显示快照状态与直连 RPC 结果），比猜代码高效得多。
 
 ### 8.3 客户端 bundle 格式
 
