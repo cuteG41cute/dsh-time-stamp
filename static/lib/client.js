@@ -49,7 +49,9 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = react.useState(false);
       let workspace = null;
       if (typeof props.useWorkspaces === 'function') {
-        const wsState = props.useWorkspaces();
+        // The selector hook REQUIRES a selector argument (its uSES shim calls
+        // it unconditionally); calling it bare throws "w is not a function".
+        const wsState = props.useWorkspaces((s) => s);
         const items = wsState && Array.isArray(wsState.items) ? wsState.items : [];
         workspace = items.find((w) => w && Array.isArray(w.sessionIds) && w.sessionIds.indexOf(props.sessionId) !== -1) || null;
       }
