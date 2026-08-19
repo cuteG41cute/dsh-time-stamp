@@ -22,9 +22,25 @@
 
 > Time the user's latest message was received: 2026-08-17T15:33:51+08:00[Asia/Shanghai]. Elapsed since the previous user message: 4m 40s. Interpret relative time references (now, today, yesterday, 现在, 今天, 刚才) against this instant.
 
+### 安装（静态常驻版，推荐）
+
+动态插件是进程内的，DSH 重启后需要重新加载。**常驻版**是普通 npm 插件包（`static/` 目录），随组合加载，重启不丢、无需批准：
+
+1. 安装包体：把 `static/` 复制为 `~/.dsh/profiles/web/node_modules/dsh-time-stamp/`（package.json 位于该目录根部）
+2. 在 `~/.dsh/profiles/web/cordis.patch.yml` 的 `- insert:` 列表追加一行：
+
+   ```yaml
+   - id: dsh-time-stamp
+     name: 'dsh-time-stamp'
+   ```
+
+3. 重启 DSH（组合变更需重启生效），右上角出现「时间戳 开」即成功
+
+> **配置迁移**：常驻版把配置写入 `settings.yaml` 的 `time-stamp` 段（全局默认 + 每工作区覆盖，schema 校验），不再使用 `~/.dsh/storages/time_stamp.json`（旧的 storage 文件可删）。行为与动态版一致：缓存友好、不改用户原文、界面为折叠的「上下文注入」行、按项目开关。
+
 ### 安装（动态插件方式）
 
-本插件以 DSH 动态插件形式运行，源码可直接提交给 `cordis_define`：
+本插件最初以 DSH 动态插件形式运行，源码同样保留在仓库中，可直接提交给 `cordis_define`：
 
 1. 在 DSH 会话中调用 `cordis_define`（`kind: "new"`，`idPrefix: "tstmp"`）：
    - `code.host` ← [plugin/host.js](plugin/host.js) 全文
@@ -52,7 +68,7 @@
 
 ### 工作原理
 
-详见 [docs/design.md](docs/design.md)：注入点选型（`agent/pre-step` vs `llm/stream` vs `system-prompt`）、缓存命中率分析、存储方案选型（为何绕开 `settings.register`）、故障排查记录。
+详见 [docs/design.md](docs/design.md)：注入点选型（`agent/pre-step` vs `llm/stream` vs `system-prompt`）、缓存命中率分析、存储方案选型（动态版绕开 `settings.register` 的原因与静态版的正规化）、静态化移植记录、故障排查。
 
 ### 许可证
 

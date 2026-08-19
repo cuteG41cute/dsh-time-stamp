@@ -93,3 +93,36 @@ DSH 的模型请求链路：
 - 动态插件进程内生命周期：DSH 重启后需重新加载（`cordis_define` + `cordis_run`），配置持久化不受影响
 - 注入消息与 compaction 的关系：被压缩掉属正常行为
 - 子代理/API 驱动的会话：只要其会话 cwd 属于某工作区，同样受该工作区开关控制
+
+## 8. 静态化移植（static/ 目录）
+
+动态插件随进程重启消失（进程内注册表），因此移植为**普通组合插件**：一个 npm 包同时提供 Host 半部（main）与 Client 半部（`dsh.client` 声明 + `./client` bundle），组合里一行 `- id: dsh-time-stamp, name: 'dsh-time-stamp'` 即可同时挂载两端（client-modules 扫描 loader 条目中的 `dsh.client` 声明，把 `./client` 作为浏览器 bundle 供 `window.__DSH_BOOT__` 加载）。
+
+### 8.1 存储：storageDomain → settings.register
+
+动态沙箱**没有 import 能力**，只能用鸭子类型 schema 打开 storageDomain；静态包是正规 npm 包，直接 `settings.register('time-stamp', s.object({...}))`（schemastery），配置持久化到 `settings.yaml` 的 `time-stamp` 段，带 schema 校验与默认值，且用户可直接编辑文件。
+
+### 8.2 客户端通道：harness.handle → settingsScope
+
+动态版客户端用 `host.call`（动态 runner 专属内置）；静态版没有该内置。候选方案对比：
+
+| 方案 | 结论 |
+|---|---|
+| `@Remote` / typert | ❌ 客户端 remote 注册表要求真实 zod v4 schema 实例，而浏览器运行时把 zod **内联**在 dsh-client-connection / dsh-api-remotes 的 bundle 里，模块表没有可 require 的 `zod`；手写包无法满足校验 |
+| webServer 路由 + fetch | 可行但自建 HTTP 面 |
+| `settingsScope`（api.settings 通道） | ✅ 采用。Host 注册命名空间后，客户端 `ctx.settingsScope.bind({namespace, decode})` 获得控制器：`getSnapshot()/subscribe()/set(field, value)/write(op)`，读写走统一 API（loopback），**零自定义 RPC、零 zod** |
+
+### 8.3 客户端 bundle 格式
+
+浏览器 bundle 必须遵循 `window.__ModuleLoader__.load({id, factory})` 懒加载 CJS 格式（`exports.apply` + `exports.inject` 导出 cordis 插件），`require("react")` 取 React；本包只依赖 React，UI 全部用 `React.createElement` + 内联样式。
+
+### 8.4 验证手段（无重启环境）
+
+- `node --check lib/client.js`：bundle 语法
+- 从安装位置 `import('lib/index.js')`：ESM 语法、依赖解析（向上走到 profile 共享层 node_modules）
+- 可调用 schema 验证：`schema({})` → `{defaultEnabled: true, projects: {}}`（默认值生效）、`schema['~standard'].validate(...)`（Standard Schema 接口）
+- 组合变更必须重启进程才能最终生效（本机由用户重启后验证）
+
+### 8.5 动态/静态并存说明
+
+两者不会同时注入：静态版需重启才加载，而重启即清空动态注册表。迁移时旧 `time_stamp.json` 变为无用文件（默认值一致，无需数据迁移），可手动删除。
