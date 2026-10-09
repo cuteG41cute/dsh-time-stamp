@@ -39,6 +39,14 @@ window.__ModuleLoader__.load({
       whiteSpace: 'nowrap',
     };
 
+    // ── 设置行的原生外观 ──
+    // 与产品「通用设置」里的行逐值对齐（实测：行 padding 16px 0 + 底部 1px 分隔线、
+    // 文本列 gap 4 + 右侧留 48px、标题 14/22/400、说明 12/18 且用 label-tertiary）。
+    const ROW = { display: 'flex', alignItems: 'center', gap: 8, padding: '16px 0', borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.1))', width: '100%' };
+    const ROW_TEXT = { display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 auto', minWidth: 0, paddingRight: 48 };
+    const ROW_TITLE = { fontSize: 14, lineHeight: '22px', fontWeight: 400, color: 'var(--dsw-alias-label-primary, #222)' };
+    const ROW_DESC = { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary, #999)' };
+
     // ── per-project toggle: session header, right-aligned utilities ──
     function TimeStampChip(props) {
       const [state, setState] = react.useState(null);
@@ -104,17 +112,17 @@ window.__ModuleLoader__.load({
           else setError((r && r.reason) || '写入失败');
         }).then(() => setBusy(false));
       };
-      return react.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, width: '100%' } }, [
-        react.createElement('div', { key: 'l', style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } }, [
-          react.createElement('span', { key: 't', style: { fontSize: 14, lineHeight: '20px', color: 'var(--dsw-alias-label-primary, #222)' } }, '时间戳注入'),
-          react.createElement('span', { key: 'd', style: { fontSize: 12, lineHeight: '16px', color: error ? 'var(--dsw-alias-state-error-primary, #d92d20)' : 'var(--dsw-alias-label-tertiary, #999)' } }, error ? (error + '——点击重试') : '在每个用户提问后向模型注入接收时间（默认值；各项目可在会话顶部单独切换）'),
+      return react.createElement('div', { style: ROW }, [
+        react.createElement('div', { key: 'l', style: ROW_TEXT }, [
+          react.createElement('span', { key: 't', style: ROW_TITLE }, '时间戳注入'),
+          react.createElement('span', { key: 'd', style: error ? { ...ROW_DESC, color: 'var(--dsw-alias-state-error-primary, #d92d20)' } : ROW_DESC }, error ? (error + '——点击重试') : '在每个用户提问后向模型注入接收时间（默认值；各项目可在会话顶部单独切换）'),
         ]),
         react.createElement('button', {
           key: 'b',
           onClick: flip,
           disabled: busy || enabled === null,
           title: error ? error : undefined,
-          style: { ...chipStyle, minWidth: 56, justifyContent: 'center', background: enabled ? 'var(--dsw-static-deepseek-500, #4d6bfe)' : 'transparent', color: enabled ? '#fff' : 'var(--dsw-alias-label-secondary, #8a8a8a)' },
+          style: { ...chipStyle, flexShrink: 0, minWidth: 56, justifyContent: 'center', background: enabled ? 'var(--dsw-static-deepseek-500, #4d6bfe)' : 'transparent', color: enabled ? '#fff' : 'var(--dsw-alias-label-secondary, #8a8a8a)' },
         }, enabled === null ? '…' : (enabled ? '开' : '关')),
       ]);
     }
