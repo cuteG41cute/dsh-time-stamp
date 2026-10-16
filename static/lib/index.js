@@ -41,26 +41,53 @@ export const timeStampSettingsSchema = s.object({
   projects: s.dict(s.boolean()).default({}),
 })
 
+/**
+ * One process-local formatter. The fixed locale and numeric pattern keep a
+ * given instant byte-identical across calls, which is what lets the injected
+ * reading sit in the provider prefix cache unchanged.
+ */
+const CLOCK_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hourCycle: 'h23', timeZoneName: 'longOffset',
+})
+/** Canonical zone label carried in brackets. */
+const CLOCK_ZONE = CLOCK_FORMATTER.resolvedOptions().timeZone
+
 /** Format an epoch millisecond value as a stable ISO-shaped local timestamp. */
-function formatTs(now, formatter, zone) {
+function formatTs(now) {
   const parts = {}
-  for (const part of formatter.formatToParts(now)) parts[part.type] = part.value
+  for (const part of CLOCK_FORMATTER.formatToParts(now)) parts[part.type] = part.value
   const offset = parts.timeZoneName.replace(/^GMT$/, 'GMT+00:00').slice(3)
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}[${zone}]`
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}[${CLOCK_ZONE}]`
 }
 
-/** Format a non-negative elapsed millisecond count as compact whole-second units. */
+/** Format a non-negative elapsed millisecond count as compact Chinese units. */
 function formatDuration(ms) {
   let seconds = Math.floor(Math.max(0, ms) / 1000)
   const days = Math.floor(seconds / 86400); seconds %= 86400
   const hours = Math.floor(seconds / 3600); seconds %= 3600
   const minutes = Math.floor(seconds / 60); seconds %= 60
   const parts = []
-  if (days > 0) parts.push(`${days}d`)
-  if (hours > 0) parts.push(`${hours}h`)
-  if (minutes > 0) parts.push(`${minutes}m`)
-  parts.push(`${seconds}s`)
+  if (days > 0) parts.push(`${days} 天`)
+  if (hours > 0) parts.push(`${hours} 小时`)
+  if (minutes > 0) parts.push(`${minutes} 分`)
+  parts.push(`${seconds} 秒`)
   return parts.join(' ')
+}
+
+/**
+ * Render the injected clock reading — Chinese prose, with the instant kept in
+ * ISO form (locale-independent and unambiguous) and the zone in brackets.
+ * @param now - epoch milliseconds the user's latest message was received.
+ * @param prev - epoch milliseconds of the previous user message, when known.
+ * @returns the complete injected text.
+ */
+export function renderClockText(now, prev) {
+  let text = `【系统时钟】最新一条用户消息的接收时间：${formatTs(now)}。`
+  if (prev !== undefined) text += `距上一条用户消息：${formatDuration(now - prev)}。`
+  text += '请以该时刻为基准理解相对时间表述（如「现在、今天、昨天、刚才」）。'
+  return text
 }
 
 /** Recursively freeze one owned plain-data value. */
@@ -139,17 +166,9 @@ export class TimeStampService extends Service {
       if (lastUser < 0) return decision
       if (!this.enabledFor(await this.workspaceIdOf(payload.agent))) return decision
 
-      const formatter = new Intl.DateTimeFormat('en-US', {
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hourCycle: 'h23', timeZoneName: 'longOffset',
-      })
-      const zone = formatter.resolvedOptions().timeZone
       const now = Date.now()
       const prev = this.previousUserMessageTime(payload.agent)
-      let text = `Time the user's latest message was received: ${formatTs(now, formatter, zone)}.`
-      if (prev !== undefined) text += ` Elapsed since the previous user message: ${formatDuration(now - prev)}.`
-      text += ' Interpret relative time references (now, today, yesterday, 现在, 今天, 刚才) against this instant.'
+      const text = renderClockText(now, prev)
       const injected = deepFreeze({
         id: `ts-${now}-${messageSeq++}`,
         role: 'user',

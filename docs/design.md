@@ -46,10 +46,10 @@ DSH 的模型请求链路：
 ## 4. 消息与文本设计（无歧义）
 
 - 注入为**独立消息**（`source.kind: "plugin"`），绝不修改用户消息的 content
-- 文本以 "Time the user's latest message was received: ..." 开头，明确声明为系统时钟读数
-- 附解释指令：相对时间表述（现在/今天/刚才/now/today/yesterday）以此时刻为锚
-- 附带「距上一条用户消息的间隔」（扫描会话日志中最近一条 `source.kind === "user"` 的 `user/message` 事件的 time 计算）
-- 格式确定性：`Intl.DateTimeFormat("en-US", {..., hourCycle: "h23", timeZoneName: "longOffset"})`，同一时刻永远格式化出同一字符串
+- 文本以「【系统时钟】最新一条用户消息的接收时间：…」开头，明确声明为系统时钟读数（**全中文行文**，仅时刻保留 ISO 形式——它locale无关、无歧义，且保证同刻逐字节一致）
+- 附解释指令：相对时间表述（现在/今天/昨天/刚才）以此时刻为锚
+- 附带「距上一条用户消息的间隔」（扫描会话日志中最近一条 `source.kind === "user"` 的 `user/message` 事件的 time 计算），中文单位输出（如「1 天 1 小时 1 分 1 秒」）
+- 格式确定性：`Intl.DateTimeFormat("en-US", {..., hourCycle: "h23", timeZoneName: "longOffset"})`，同一时刻永远格式化出同一字符串；`renderClockText()` 为导出的纯函数，便于离线验证
 
 ## 5. 配置存储选型
 

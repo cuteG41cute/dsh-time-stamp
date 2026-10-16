@@ -102,10 +102,10 @@ return {
       const h = Math.floor(s / 3600); s %= 3600
       const m = Math.floor(s / 60); s %= 60
       const out = []
-      if (d > 0) out.push(d + 'd')
-      if (h > 0) out.push(h + 'h')
-      if (m > 0) out.push(m + 'm')
-      out.push(s + 's')
+      if (d > 0) out.push(d + ' 天')
+      if (h > 0) out.push(h + ' 小时')
+      if (m > 0) out.push(m + ' 分')
+      out.push(s + ' 秒')
       return out.join(' ')
     }
     const previousUserMessageTime = (agent) => {
@@ -144,9 +144,9 @@ return {
         if (!readEnabled(await workspaceIdOf(payload.agent))) return decision
         const now = Date.now()
         const prev = previousUserMessageTime(payload.agent)
-        let text = "Time the user's latest message was received: " + formatTs(now) + '.'
-        if (prev !== undefined) text += ' Elapsed since the previous user message: ' + formatDuration(now - prev) + '.'
-        text += ' Interpret relative time references (now, today, yesterday, 现在, 今天, 刚才) against this instant.'
+        let text = '【系统时钟】最新一条用户消息的接收时间：' + formatTs(now) + '。'
+        if (prev !== undefined) text += '距上一条用户消息：' + formatDuration(now - prev) + '。'
+        text += '请以该时刻为基准理解相对时间表述（如「现在、今天、昨天、刚才」）。'
         const injected = deepFreeze({
           id: 'ts-' + now + '-' + (seq++),
           role: 'user',
