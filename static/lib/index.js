@@ -3,42 +3,94 @@
 // A regular DSH plugin loaded from the composition (cordis.patch.yml row),
 // so it survives process restarts — unlike the dynamic form in ../plugin.
 //
+// Supported dsh generations (feature-detected at runtime, one code path):
+//
+//   legacy  (dsh <= 0.1.6, @deepseek-ai/dsh-settings without volatile configs)
+//     · settings.register(ns, schema) registers the namespace + its form
+//     · settings.get(ns) reads the resolved value
+//     · settings.mutate(ns, ops) writes, ns = the registered namespace
+//
+//   config  (dsh >= 0.1.7, incl. 0.2.x)
+//     · `static Config` (schemastery, volatile fields) is the settings form;
+//       the Settings service reads it from the entry's fiber runtime
+//     · the plugin reads its own Config reference — volatile fields are
+//       `Volatile<T>` wrappers updated in place, so `value.get()` is live
+//     · settings.mutate(entryId, ops) writes, ns = the PROFILE ENTRY ID
+//       (e.g. `dsh-time-stamp`) and only volatile paths are accepted
+//
 // Responsibilities:
-//  1. Register the 'time-stamp' settings namespace (schemastery schema,
-//     persisted in DSH_HOME/settings.yaml) holding the global default and
-//     per-workspace overrides. The namespace is used HOST-side only: the
-//     apiProxy settings allowlist is hardcoded in @deepseek-ai/dsh-host-apiproxy
-//     (WEB_SETTINGS_NAMESPACES / PRODUCT_SETTINGS_NAMESPACES), so third-party
-//     namespaces are intentionally NOT served to configuration clients.
+//  1. Register/expose the plugin configuration (global default + per-workspace
+//     overrides).
 //  2. Listen on agent/pre-step (prepend) and append ONE durable plugin-source
-//     clock message after every user-origin message, exactly like the
-//     dynamic version: written to the session log once, replayed
-//     byte-identically on every later request (provider prefix cache keeps
-//     hitting), never touching the user's own text.
+//     clock message after every user-origin message: written to the session log
+//     once, replayed byte-identically on every later request (provider prefix
+//     cache keeps hitting), never touching the user's own text.
 //  3. Serve a small JSON API on an exact webServer route
 //     (POST /dsh-time-stamp/api, body { method, args }) that the client half
-//     calls with fetch — the browser-side channel that bypasses the settings
-//     allowlist and needs no typert/zod machinery.
+//     calls with fetch — a browser-side channel that bypasses the apiProxy
+//     settings allowlist and needs no typert/zod machinery.
 //
 // The pre-step listener never throws: on any unexpected failure it passes the
 // original decision through so the agent loop is never disturbed.
 import { Service } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 
-/** Settings namespace owned by this plugin. */
+/** Legacy settings namespace (dsh <= 0.1.6). */
 export const SETTINGS_NS = 'time-stamp'
 /** Source plugin name stamped into injected messages. */
 export const PLUGIN = 'time-stamp'
 /** Exact webServer route serving the client JSON API. */
 export const ROUTE_PATH = '/dsh-time-stamp/api'
+/** Fallback profile entry id (dsh >= 0.1.7 addresses settings by entry id). */
+export const DEFAULT_ENTRY_ID = 'dsh-time-stamp'
 
 /** Monotonic suffix so two injections in the same millisecond never collide. */
 let messageSeq = 0
 
-/** Resolved per-project configuration. */
+/**
+ * Mark a config field volatile when the installed schemastery supports it.
+ * Volatile fields are the only ones the Settings service lets a form edit live
+ * (`dsh-settings` >= 0.1.7); older schemastery has no `.volatile()`.
+ * @param schema - one schemastery field.
+ * @returns the same field, volatile-marked when supported.
+ */
+function volatileField(schema) {
+  return typeof schema.volatile === 'function' ? schema.volatile() : schema
+}
+
+/**
+ * Read the current value of a config field: volatile fields are wrappers whose
+ * `get()` is updated in place, plain fields are the value itself.
+ * @param value - a resolved config field.
+ * @returns the plain current value.
+ */
+export function currentValue(value) {
+  return value !== null && value !== undefined && typeof value.get === 'function' ? value.get() : value
+}
+
+/**
+ * Effective injection flag for one workspace (or the global default).
+ * Pure helper so the decision can be verified without a live service.
+ * @param config - resolved plugin config (plain or volatile-wrapped).
+ * @param workspaceId - owning workspace id, or undefined for the global default.
+ * @returns whether the clock reading should be injected.
+ */
+export function enabledFromConfig(config, workspaceId) {
+  const source = config !== null && typeof config === 'object' ? config : {}
+  const projects = currentValue(source.projects)
+  const map = projects !== null && typeof projects === 'object' ? projects : {}
+  if (workspaceId !== undefined && typeof map[workspaceId] === 'boolean') return map[workspaceId]
+  const fallback = currentValue(source.defaultEnabled)
+  return typeof fallback === 'boolean' ? fallback : true
+}
+
+/**
+ * Resolved plugin configuration. `volatile` fields carry the live value, so the
+ * same object can be read before and after a settings write.
+ */
 export const timeStampSettingsSchema = s.object({
-  defaultEnabled: s.boolean().default(true),
-  projects: s.dict(s.boolean()).default({}),
+  defaultEnabled: volatileField(s.boolean().default(true)),
+  projects: volatileField(s.dict(s.boolean()).default({})),
 })
 
 /**
@@ -106,13 +158,30 @@ function deepFreeze(value) {
 
 export class TimeStampService extends Service {
   static inject = ['settings', 'workspaceRegistry', 'agents', 'webServer']
+  static Config = timeStampSettingsSchema
 
-  constructor(ctx) {
+  constructor(ctx, config) {
     super(ctx, 'timeStamp')
+    /** Validated config reference (dsh >= 0.1.7: volatile fields stay live). */
+    this.config = config
+    /** Cached profile entry id used as the settings namespace on dsh >= 0.1.7. */
+    this.entryId = undefined
+  }
+
+  /** Whether the installed dsh still exposes the legacy register()/get() API. */
+  get legacySettings() {
+    try {
+      return typeof this.ctx.settings.register === 'function'
+    } catch {
+      return false
+    }
   }
 
   async [Service.init]() {
-    this.ctx.settings.register(SETTINGS_NS, timeStampSettingsSchema)
+    if (this.legacySettings) {
+      // dsh <= 0.1.6: the namespace must be registered to be writable/readable.
+      this.ctx.settings.register(SETTINGS_NS, timeStampSettingsSchema)
+    }
     this.ctx.effect(() => this.ctx.on('agent/pre-step', (payload, next) => this.onPreStep(payload, next), { prepend: true }))
     this.ctx.effect(() => this.ctx.webServer.register({
       kind: 'exact',
@@ -121,10 +190,47 @@ export class TimeStampService extends Service {
     }))
   }
 
+  /** Current resolved config, preferring the fiber's live validated config. */
+  readConfig() {
+    if (this.legacySettings) {
+      try {
+        const value = this.ctx.settings.get(SETTINGS_NS)
+        if (value !== undefined) return value
+      } catch {
+        // fall through to the constructor config
+      }
+    }
+    const fiberConfig = this.ctx.fiber === undefined || this.ctx.fiber === null ? undefined : this.ctx.fiber.config
+    return fiberConfig !== undefined && fiberConfig !== null ? fiberConfig : this.config
+  }
+
+  /** Resolve the profile entry id this plugin is mounted under (dsh >= 0.1.7). */
+  resolveEntryId() {
+    if (this.entryId !== undefined) return this.entryId
+    const editor = this.ctx.get('configEditor')
+    if (editor !== undefined && typeof editor.entries === 'function') {
+      try {
+        const rows = Array.from(editor.entries() ?? [])
+        const row = rows.find((candidate) => candidate !== null && candidate !== undefined && candidate.fiber === this.ctx.fiber)
+        const id = row === undefined ? undefined : row.options && row.options.id
+        if (typeof id === 'string' && id !== '') {
+          this.entryId = id
+          return this.entryId
+        }
+      } catch {
+        // fall through to the documented default
+      }
+    }
+    const fromEnv = typeof process !== 'undefined' && process.env !== undefined ? process.env.DSH_TIME_STAMP_ENTRY_ID : undefined
+    this.entryId = typeof fromEnv === 'string' && fromEnv !== '' ? fromEnv : DEFAULT_ENTRY_ID
+    return this.entryId
+  }
+
   /** Resolve the workspace owning one agent's session cwd. */
   async workspaceIdOf(agent) {
-    const meta = agent && agent.session ? agent.session.meta : undefined
-    const cwd = meta && typeof meta.cwd === 'string' ? meta.cwd : undefined
+    const session = agent && agent.session ? agent.session : undefined
+    const header = session ? (session.header ?? session.meta) : undefined
+    const cwd = header && typeof header.cwd === 'string' ? header.cwd : undefined
     if (cwd === undefined || cwd === '') return undefined
     try {
       const ws = await this.ctx.workspaceRegistry.resolveByPath(cwd)
@@ -136,16 +242,24 @@ export class TimeStampService extends Service {
 
   /** Whether injection is enabled for one workspace id (undefined = global default). */
   enabledFor(workspaceId) {
-    const config = this.ctx.settings.get(SETTINGS_NS)
-    const projects = config && typeof config.projects === 'object' && config.projects !== null ? config.projects : {}
-    if (workspaceId !== undefined && typeof projects[workspaceId] === 'boolean') return projects[workspaceId]
-    return config && typeof config.defaultEnabled === 'boolean' ? config.defaultEnabled : true
+    return enabledFromConfig(this.readConfig(), workspaceId)
   }
 
   /** Time of the most recent user-origin message before the current step. */
   previousUserMessageTime(agent) {
-    const events = agent && agent.session ? agent.session.events : undefined
-    if (!Array.isArray(events)) return undefined
+    const session = agent && agent.session ? agent.session : undefined
+    if (session === undefined || session === null) return undefined
+    let events
+    // dsh >= 0.2: the log is only reachable through snapshotEvents()/eventAt().
+    if (typeof session.snapshotEvents === 'function') {
+      try {
+        events = session.snapshotEvents()
+      } catch {
+        events = undefined
+      }
+    }
+    // dsh <= 0.1.6 exposed the live log array directly.
+    if (!Array.isArray(events)) events = Array.isArray(session.events) ? session.events : []
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i]
       if (ev && ev.type === 'user/message' && ev.data && ev.data.source && ev.data.source.kind === 'user') return ev.time
@@ -243,14 +357,16 @@ export class TimeStampService extends Service {
           title,
           enabled: this.enabledFor(workspaceId),
           defaultEnabled: this.enabledFor(undefined),
+          settings: this.legacySettings ? 'legacy' : 'config',
+          entryId: this.legacySettings ? SETTINGS_NS : this.resolveEntryId(),
         }
       }
       case 'set-enabled': {
         const workspaceId = typeof args.workspaceId === 'string' && args.workspaceId !== '' ? args.workspaceId : undefined
         const enabled = typeof args.enabled === 'boolean' ? args.enabled : undefined
         if (enabled === undefined) return { ok: false, reason: 'bad args' }
-        if (workspaceId === undefined) await this.writeDefault(enabled)
-        else await this.writeProject(workspaceId, enabled)
+        if (workspaceId === undefined) await this.writeOps([{ op: 'set', path: ['defaultEnabled'], value: enabled }])
+        else await this.writeOps([{ op: 'set', path: ['projects', workspaceId], value: enabled }])
         return { ok: true, enabled }
       }
       case 'get-default':
@@ -258,7 +374,7 @@ export class TimeStampService extends Service {
       case 'set-default': {
         const enabled = typeof args.enabled === 'boolean' ? args.enabled : undefined
         if (enabled === undefined) return { ok: false, reason: 'bad args' }
-        await this.writeDefault(enabled)
+        await this.writeOps([{ op: 'set', path: ['defaultEnabled'], value: enabled }])
         return { ok: true, enabled }
       }
       default:
@@ -266,14 +382,16 @@ export class TimeStampService extends Service {
     }
   }
 
-  /** Set one workspace override via a path-addressed settings mutation. */
-  async writeProject(workspaceId, enabled) {
-    await this.ctx.settings.mutate(SETTINGS_NS, [{ op: 'set', path: ['projects', workspaceId], value: enabled }])
-  }
-
-  /** Set the global default via a path-addressed settings mutation. */
-  async writeDefault(enabled) {
-    await this.ctx.settings.mutate(SETTINGS_NS, [{ op: 'set', path: ['defaultEnabled'], value: enabled }])
+  /**
+   * Persist config edits. Legacy dsh writes through the registered namespace;
+   * newer dsh addresses the profile entry id and only accepts volatile paths.
+   */
+  async writeOps(ops) {
+    if (this.legacySettings) {
+      await this.ctx.settings.mutate(SETTINGS_NS, ops)
+      return
+    }
+    await this.ctx.settings.mutate(this.resolveEntryId(), ops)
   }
 }
 

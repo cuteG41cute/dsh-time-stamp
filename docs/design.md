@@ -128,3 +128,39 @@ DSH 的模型请求链路：
 ### 8.5 动态/静态并存说明
 
 两者不会同时注入：静态版需重启才加载，而重启即清空动态注册表。迁移时旧 `time_stamp.json` 变为无用文件（默认值一致，无需数据迁移），可手动删除。
+
+## 9. dsh 0.2.x 兼容性移植（v1.1.0）
+
+### 9.1 破坏性变更清单（以 npm 包源码为准，逐条核实）
+
+| 变更 | 0.1.x | 0.2.x | 影响 |
+|---|---|---|---|
+| `settings.register(ns, schema)` | 有 | **移除** | 插件初始化直接抛 `TypeError` → 整条插件不激活 |
+| `settings.get(ns)` | 有 | **移除** | 读配置无处可读 |
+| 设置声明方式 | register 的 schema | 插件的 **`static Config`**（`describe()` 读 `entry.fiber.runtime.Config`） | 需暴露 Config |
+| 设置命名空间 | 注册的 ns（`time-stamp`） | **组合条目标识**（`dsh-time-stamp`） | 写错 ns 抛 `No configurable plugin entry` |
+| 可写字段 | 任意 | **仅 volatile 字段**（`schema.meta.volatile`），逐路径校验 | 需 `.volatile()` 标记 |
+| `Session.events` | 有（数组） | **移除**，只有 `snapshotEvents(from?, to?)` / `eventAt(seq)` | 「距上一条消息」永久缺失（被守卫成静默） |
+| 会话元数据 | `session.header`（`meta` 只是创建入参） | 同左 | **按工作区归属一直静默退化**（旧代码读 `session.meta`） |
+| `agent/pre-step` | `{messages, turn, step, signal}` + `{kind:'enter', messages}` | **未变** | 注入点无需改 |
+| `webServer.register({kind, path, handler})` | 同 | **未变** | 路由无需改 |
+
+### 9.2 运行时特性检测（单一代码路径）
+
+```
+legacySettings = typeof ctx.settings.register === 'function'   // dsh <= 0.1.6
+  true  → register(ns, schema) + get(ns) + mutate(ns, ops)
+  false → static Config（volatile）+ 读自己的 config 引用 + mutate(entryId, ops)
+```
+
+- **volatile 标记**：`volatileField(schema)` 在 schemastery 有 `.volatile()` 时调用（3.18.5+），否则原样返回（3.18.2 老环境），保证同一份 schema 两代可用。
+- **读值**：`currentValue(v)` 在 `v.get()` 存在时解包（`Volatile<T>` 包装，`updateVolatile` 是**原地写入**，因此同一实例读到的永远是最新值）。
+- **条目 id**：优先 `ctx.get('configEditor').entries()` 中 `fiber === ctx.fiber` 的那行（与 Settings 服务同源），失败回退环境变量 `DSH_TIME_STAMP_ENTRY_ID`，再回退 `dsh-time-stamp`。
+- **会话事件**：`session.snapshotEvents()` 优先、`session.events` 回退；每次注入调用一次快照（不在循环里）。
+- **会话 cwd**：`session.header ?? session.meta`。
+
+### 9.3 验证（本机 0.1.5 环境 + 新包源码）
+
+- 老环境导入：`exports` 完整、`enabledFromConfig` 对 plain/volatile 两种配置均正确、schema 默认值正确、`renderClockText` 输出正确；
+- 新环境（schemastery 3.18.5 + cosmokit）：`.volatile()` 存在、解析结果 `value.<field>.get()` 可读、`schema.dict.<field>.meta.volatile === true`（`volatileForm` 与 `isVolatilePath` 的前提）、`schema({projects:{ws:false}})` 的覆盖生效；
+- 0.2.x 行号/契约与 issue 报告一致（`dsh-settings` 0.2.1-rc.5 `describe` 读 `entry.fiber.runtime.Config`、`write` 按 `entry.options.id` 找条目并校验 volatile 路径）。

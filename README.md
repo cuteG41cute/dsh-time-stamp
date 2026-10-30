@@ -18,6 +18,21 @@
 - **界面隐身**：不显示为消息气泡，而是呈现为一行可折叠的灰色小字「上下文注入」行（产品为注入上下文设计的原生呈现）
 - **配置持久化**：常驻版写入 `~/.dsh/settings.yaml` 的 `time-stamp` 段（动态版为 `~/.dsh/storages/time_stamp.json`）
 
+### 版本兼容性（v1.1.0 起）
+
+一份代码同时支持两代 dsh，运行时特性检测、无需分叉：
+
+| dsh | 设置 API | 本插件的做法 |
+|---|---|---|
+| **0.1.x**（≤ 0.1.6） | `settings.register()` / `get()` | 注册命名空间 `time-stamp`；`register/get/mutate` 走老接口 |
+| **0.2.x**（≥ 0.1.7，含 0.2.1-rc.5） | 无 `register/get`，用 **`Config` + volatile** | `static Config`（volatile 字段）作为设置表单；读自己的 Config 引用；写入 `mutate(条目标识)` |
+
+- **0.2.x 的命名空间 = 组合条目标识**（默认 `dsh-time-stamp`，可用环境变量 `DSH_TIME_STAMP_ENTRY_ID` 覆盖），因此「设置 → 插件」里会出现该插件的表单；
+- **写入只改 volatile 字段**（`defaultEnabled` 与 `projects` 均已标记），符合 0.2.x 的配置编辑契约；
+- 升级方式不变：把 `static/` 覆盖到 profile 的 `node_modules/dsh-time-stamp/`，重启 dsh。
+
+> 修复记录（v1.1.0）：① `session.events` 在 0.2.x 已移除 → 改用 `snapshotEvents()`（否则「距上一条消息」永远缺失）；② 会话元数据属性是 `session.header` 而非 `session.meta` → 此前**按工作区开关一直静默退化到全局默认**，现已修复。
+
 ### 注入内容示例
 
 > 【系统时钟】最新一条用户消息的接收时间：2026-08-17T15:33:51+08:00[Asia/Shanghai]。距上一条用户消息：4 分 40 秒。请以该时刻为基准理解相对时间表述（如「现在、今天、昨天、刚才」）。
@@ -41,6 +56,8 @@
 ### 安装（动态插件方式）
 
 本插件最初以 DSH 动态插件形式运行，源码同样保留在仓库中，可直接提交给 `cordis_define`：
+
+> ⚠️ 动态形式面向 **dsh 0.1.x**（其沙箱里 `ctx.get('settings')` 还是老接口）；**0.2.x 请使用上面的常驻版**。
 
 1. 在 DSH 会话中调用 `cordis_define`（`kind: "new"`，`idPrefix: "tstmp"`）：
    - `code.host` ← [plugin/host.js](plugin/host.js) 全文
