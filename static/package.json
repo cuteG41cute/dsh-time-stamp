@@ -1,6 +1,6 @@
 {
   "name": "dsh-time-stamp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DeepSeek Harness static plugin: injects a durable clock-context message after every user question (cache-friendly, no ambiguity, stealth presentation) with per-project enable/disable. Composition-loaded, survives restarts. Compatible with dsh 0.1.x (legacy settings API) and 0.2.x (Config + volatile settings).",
   "type": "module",
   "main": "lib/index.js",

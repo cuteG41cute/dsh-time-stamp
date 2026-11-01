@@ -164,3 +164,35 @@ legacySettings = typeof ctx.settings.register === 'function'   // dsh <= 0.1.6
 - 老环境导入：`exports` 完整、`enabledFromConfig` 对 plain/volatile 两种配置均正确、schema 默认值正确、`renderClockText` 输出正确；
 - 新环境（schemastery 3.18.5 + cosmokit）：`.volatile()` 存在、解析结果 `value.<field>.get()` 可读、`schema.dict.<field>.meta.volatile === true`（`volatileForm` 与 `isVolatilePath` 的前提）、`schema({projects:{ws:false}})` 的覆盖生效；
 - 0.2.x 行号/契约与 issue 报告一致（`dsh-settings` 0.2.1-rc.5 `describe` 读 `entry.fiber.runtime.Config`、`write` 按 `entry.options.id` 找条目并校验 volatile 路径）。
+
+### 9.4 会话格式 v4 的 source 契约（v1.1.1）
+
+0.2.x 把会话格式升到 **v4**，并在 Session 采纳前对每个消息槽位做产出方校验（`dsh-session-format-v3-to-v4`）：
+
+```js
+// lib/index.js:124
+function source(message) {
+  const value = message["source"];
+  if (!isSessionFormatJsonObject(value) || typeof value["kind"] !== "string"
+      || value["kind"].length === 0 || value["kind"] === "plugin")
+    throw new SessionFormatError("format v4 message requires a producer-owned source kind");
+}
+```
+
+- **v3 写法（`kind: 'plugin'` + `plugin` 字段）被点名禁止**——每轮注入都在写入前抛错，时间上下文进不了模型，日志每轮一条错误；
+- **等价写法**由迁移器的 `producerKind()`（`:88`）定义：非官方插件 → `plugin:<plugin>`，并**删掉 `plugin` 字段**；`form` / `sections` 等自定义字段保留（v4 只约束 `kind`）；
+- 实现：`PLUGIN_KIND = 'plugin:' + PLUGIN`，注入 `source: { kind: PLUGIN_KIND, form: 'snapshot', sections: [...] }`；
+- **读侧不动**：判断「真实用户消息」仍是 `source.kind === 'user'`，注入消息自然被跳过。
+
+**验证**（用真实校验器，不是推断）：把 `buildInjectedMessage()` 产出的对象包成 `{ type: 'user/message', data }`，交给 `assertV4RowAdmission`：
+
+```
+kind: plugin:time-stamp | has plugin field: false | form: snapshot
+V4 ADMISSION: PASS
+NEGATIVE CONTROL: rejected as expected -> format v4 message requires a producer-owned source kind
+```
+
+**0.1.x 兼容性**：0.1.5 的框架没有这条校验（`producer-owned` 零命中），改 kind 不会抛错；其客户端
+`contextProvenance` 对未知 kind 走 default 分支（`role: 'inject'`, `label: kind`），所以注入行照常渲染、只是标签从
+`time-stamp` 变成 `plugin:time-stamp`。唯一没实测过的点是旧版历史重放——建议在 0.1.x 实例上重启后确认一次
+（本机 0.1.5 实例的安装副本已同步）。

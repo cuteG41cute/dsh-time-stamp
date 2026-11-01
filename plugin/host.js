@@ -24,6 +24,9 @@
 return {
   async apply(ctx) {
     const PLUGIN = 'time-stamp'
+    // dsh 0.2.x (session format v4) rejects `kind: 'plugin'`; the migrator's
+    // producer-owned equivalent for a third-party plugin is `plugin:<name>`.
+    const PLUGIN_KIND = 'plugin:' + PLUGIN
     const KEY_DEFAULT = '__default__'
     const DEFAULT_ENABLED = true
     let table = null
@@ -152,8 +155,7 @@ return {
           role: 'user',
           content: [{ type: 'text', text: text }],
           source: {
-            kind: 'plugin',
-            plugin: PLUGIN,
+            kind: PLUGIN_KIND,
             form: 'snapshot',
             sections: [{ name: PLUGIN, text: text }],
           },

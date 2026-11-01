@@ -32,6 +32,8 @@
 - 升级方式不变：把 `static/` 覆盖到 profile 的 `node_modules/dsh-time-stamp/`，重启 dsh。
 
 > 修复记录（v1.1.0）：① `session.events` 在 0.2.x 已移除 → 改用 `snapshotEvents()`（否则「距上一条消息」永远缺失）；② 会话元数据属性是 `session.header` 而非 `session.meta` → 此前**按工作区开关一直静默退化到全局默认**，现已修复。
+>
+> 修复记录（v1.1.1）：注入消息的 `source.kind` 由 v3 的 `plugin` 改为**产出方自有 kind** `plugin:time-stamp`（0.2.x 会话格式 v4 强制要求，否则每轮都抛 `format v4 message requires a producer-owned source kind`；旧版不校验，两端通用）。用 `dsh-session-format-v3-to-v4` 的 `assertV4RowAdmission` 实测通过；0.1.x 上注入行标签会相应显示为 `plugin:time-stamp`。
 
 ### 注入内容示例
 

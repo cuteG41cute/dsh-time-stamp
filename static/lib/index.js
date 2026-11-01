@@ -39,6 +39,14 @@ import s from '@deepseek-ai/schemastery'
 export const SETTINGS_NS = 'time-stamp'
 /** Source plugin name stamped into injected messages. */
 export const PLUGIN = 'time-stamp'
+/**
+ * Producer-owned source kind. dsh 0.2.x session format v4 rejects
+ * `kind: 'plugin'` ("format v4 message requires a producer-owned source kind");
+ * the migrator's equivalent for a third-party plugin is `plugin:<name>` with
+ * the `plugin` field dropped. Older dsh renders any non-`user` kind as a
+ * context-injection row, so the same value works on both generations.
+ */
+export const PLUGIN_KIND = 'plugin:' + PLUGIN
 /** Exact webServer route serving the client JSON API. */
 export const ROUTE_PATH = '/dsh-time-stamp/api'
 /** Fallback profile entry id (dsh >= 0.1.7 addresses settings by entry id). */
@@ -154,6 +162,29 @@ function deepFreeze(value) {
     for (const key of Object.keys(node)) pending.push(node[key])
   }
   return value
+}
+
+/**
+ * Build the durable clock message appended after one user-origin message.
+ * Pure and exported so the exact logged shape can be checked against the
+ * session format validators without a live service.
+ * @param now - epoch milliseconds the user's latest message was received.
+ * @param prev - epoch milliseconds of the previous user message, when known.
+ * @param id - stable message id for this injection.
+ * @returns the frozen user message carrying the clock reading.
+ */
+export function buildInjectedMessage(now, prev, id) {
+  const text = renderClockText(now, prev)
+  return deepFreeze({
+    id,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: {
+      kind: PLUGIN_KIND,
+      form: 'snapshot',
+      sections: [{ name: PLUGIN, text }],
+    },
+  })
 }
 
 export class TimeStampService extends Service {
@@ -282,18 +313,7 @@ export class TimeStampService extends Service {
 
       const now = Date.now()
       const prev = this.previousUserMessageTime(payload.agent)
-      const text = renderClockText(now, prev)
-      const injected = deepFreeze({
-        id: `ts-${now}-${messageSeq++}`,
-        role: 'user',
-        content: [{ type: 'text', text }],
-        source: {
-          kind: 'plugin',
-          plugin: PLUGIN,
-          form: 'snapshot',
-          sections: [{ name: PLUGIN, text }],
-        },
-      })
+      const injected = buildInjectedMessage(now, prev, `ts-${now}-${messageSeq++}`)
       return {
         kind: 'enter',
         messages: msgs.slice(0, lastUser + 1).concat([injected], msgs.slice(lastUser + 1)),
